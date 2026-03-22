@@ -1,10 +1,3 @@
-"""
-ChromaDB Text File Ingestion Pipeline
-
-Reads .txt files from an input directory, chunks them, and stores
-vectorized embeddings in a persistent ChromaDB database.
-"""
-
 import argparse
 import os
 import sys
@@ -12,10 +5,19 @@ import hashlib
 from pathlib import Path
 
 import chromadb
+import ollama
+
+
+EMBED_MODEL = "nomic-embed-text"
+CHAT_MODEL = "llama3.1"
+
+
+def embed(text: str) -> list[float]:
+    res = ollama.embed(model=EMBED_MODEL, input=text)
+    return res["embeddings"][0]
 
 
 def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
-    """Split text into overlapping chunks by character count."""
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     if chunk_overlap < 0 or chunk_overlap >= chunk_size:
@@ -31,13 +33,11 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
 
 
 def make_doc_id(filename: str, chunk_index: int) -> str:
-    """Create a deterministic document ID from filename and chunk index."""
     raw = f"{filename}::chunk_{chunk_index}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
 def read_txt_files(input_dir: str, encoding: str) -> list[tuple[str, str]]:
-    """Read all .txt files from the input directory. Returns list of (filename, content)."""
     input_path = Path(input_dir)
     if not input_path.is_dir():
         print(f"Error: '{input_dir}' is not a valid directory.")
@@ -78,13 +78,10 @@ def ingest(
     batch_size: int,
     reset: bool,
 ):
-    """Main ingestion pipeline."""
-    # 1. Read files
     print(f"Reading .txt files from: {input_dir}")
     file_contents = read_txt_files(input_dir, encoding)
     print(f"  Found {len(file_contents)} file(s).\n")
 
-    # 2. Connect to ChromaDB
     print(f"Opening ChromaDB at: {db_dir}")
     client = chromadb.PersistentClient(path=db_dir)
 
@@ -101,7 +98,6 @@ def ingest(
     )
     print(f"  Collection '{collection_name}' ready (existing docs: {collection.count()}).\n")
 
-    # 3. Chunk and ingest
     total_chunks = 0
     for filename, content in file_contents:
         chunks = chunk_text(content, chunk_size, chunk_overlap)
@@ -110,6 +106,7 @@ def ingest(
         ids = []
         documents = []
         metadatas = []
+        embeddings = []
 
         for i, chunk in enumerate(chunks):
             doc_id = make_doc_id(filename, i)
@@ -121,14 +118,15 @@ def ingest(
                 "total_chunks": len(chunks),
                 "char_count": len(chunk),
             })
+            embeddings.append(embed(chunk))
 
-        # Upsert in batches
         for b_start in range(0, len(ids), batch_size):
             b_end = b_start + batch_size
             collection.upsert(
                 ids=ids[b_start:b_end],
                 documents=documents[b_start:b_end],
                 metadatas=metadatas[b_start:b_end],
+                embeddings=embeddings[b_start:b_end],
             )
 
         total_chunks += len(chunks)
@@ -137,8 +135,17 @@ def ingest(
     print(f"Collection now has {collection.count()} documents total.")
 
 
+def retrieve(collection, query: str, n_results: int = 4) -> list[str]:
+    query_embedding = embed(query)
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=n_results,
+        include=["documents", "metadatas", "distances"],
+    )
+    return results
+
+
 def query_db(db_dir: str, collection_name: str, query_text: str, n_results: int):
-    """Query the database and print results."""
     client = chromadb.PersistentClient(path=db_dir)
     try:
         collection = client.get_collection(name=collection_name)
@@ -146,7 +153,7 @@ def query_db(db_dir: str, collection_name: str, query_text: str, n_results: int)
         print(f"Collection '{collection_name}' not found. Run ingestion first.")
         sys.exit(1)
 
-    results = collection.query(query_texts=[query_text], n_results=n_results)
+    results = retrieve(collection, query_text, n_results)
 
     print(f"Query: \"{query_text}\"")
     print(f"Top {n_results} results:\n")
@@ -162,9 +169,43 @@ def query_db(db_dir: str, collection_name: str, query_text: str, n_results: int)
         print()
 
 
+def answer_question(db_dir: str, collection_name: str, question: str, n_results: int):
+    client = chromadb.PersistentClient(path=db_dir)
+    try:
+        collection = client.get_collection(name=collection_name)
+    except Exception:
+        print(f"Collection '{collection_name}' not found. Run ingestion first.")
+        sys.exit(1)
+
+    results = retrieve(collection, question, n_results)
+    docs = results["documents"][0]
+    context = "\n\n".join(docs)
+
+    prompt = f"""You are answering using only the provided context.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer clearly and cite which parts of the context you used."""
+
+    print(f"Question: \"{question}\"")
+    print(f"Retrieved {len(docs)} chunks for context.\n")
+    print(f"Generating answer with {CHAT_MODEL}...\n")
+
+    response = ollama.chat(
+        model=CHAT_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    print("--- Answer ---")
+    print(response["message"]["content"])
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="ChromaDB Text Ingestion Pipeline",
+        description="ChromaDB Text Ingestion Pipeline with Ollama Embeddings & RAG",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -173,28 +214,33 @@ Examples:
   python ingest.py ingest --reset
   python ingest.py query "What is machine learning?"
   python ingest.py query "search term" --n-results 10
+  python ingest.py ask "How does local RAG work?"
         """,
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    # Ingest subcommand
     ingest_parser = subparsers.add_parser("ingest", help="Ingest .txt files into ChromaDB")
-    ingest_parser.add_argument("--input-dir", default="./input_texts", help="Directory containing .txt files (default: ./input_texts)")
-    ingest_parser.add_argument("--db-dir", default="./chroma_db", help="ChromaDB storage directory (default: ./chroma_db)")
-    ingest_parser.add_argument("--collection", default="documents", help="Collection name (default: documents)")
-    ingest_parser.add_argument("--chunk-size", type=int, default=1000, help="Characters per chunk (default: 1000)")
-    ingest_parser.add_argument("--chunk-overlap", type=int, default=200, help="Overlap between chunks (default: 200)")
-    ingest_parser.add_argument("--encoding", default="utf-8", help="File encoding (default: utf-8)")
-    ingest_parser.add_argument("--batch-size", type=int, default=100, help="ChromaDB upsert batch size (default: 100)")
-    ingest_parser.add_argument("--reset", action="store_true", help="Delete existing collection before ingesting")
+    ingest_parser.add_argument("--input-dir", default="./input_texts")
+    ingest_parser.add_argument("--db-dir", default="./chroma_db")
+    ingest_parser.add_argument("--collection", default="documents")
+    ingest_parser.add_argument("--chunk-size", type=int, default=1000)
+    ingest_parser.add_argument("--chunk-overlap", type=int, default=200)
+    ingest_parser.add_argument("--encoding", default="utf-8")
+    ingest_parser.add_argument("--batch-size", type=int, default=100)
+    ingest_parser.add_argument("--reset", action="store_true")
 
-    # Query subcommand
-    query_parser = subparsers.add_parser("query", help="Query the ChromaDB collection")
-    query_parser.add_argument("query_text", help="Text to search for")
-    query_parser.add_argument("--db-dir", default="./chroma_db", help="ChromaDB storage directory (default: ./chroma_db)")
-    query_parser.add_argument("--collection", default="documents", help="Collection name (default: documents)")
-    query_parser.add_argument("--n-results", type=int, default=5, help="Number of results (default: 5)")
+    query_parser = subparsers.add_parser("query", help="Similarity search")
+    query_parser.add_argument("query_text")
+    query_parser.add_argument("--db-dir", default="./chroma_db")
+    query_parser.add_argument("--collection", default="documents")
+    query_parser.add_argument("--n-results", type=int, default=5)
+
+    ask_parser = subparsers.add_parser("ask", help="RAG Q&A")
+    ask_parser.add_argument("question")
+    ask_parser.add_argument("--db-dir", default="./chroma_db")
+    ask_parser.add_argument("--collection", default="documents")
+    ask_parser.add_argument("--n-results", type=int, default=4)
 
     args = parser.parse_args()
 
@@ -214,6 +260,13 @@ Examples:
             db_dir=args.db_dir,
             collection_name=args.collection,
             query_text=args.query_text,
+            n_results=args.n_results,
+        )
+    elif args.command == "ask":
+        answer_question(
+            db_dir=args.db_dir,
+            collection_name=args.collection,
+            question=args.question,
             n_results=args.n_results,
         )
     else:
