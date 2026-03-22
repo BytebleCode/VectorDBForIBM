@@ -1,0 +1,63 @@
+============================================================
+  ChromaDB Vectorized DB Pipeline - Commands Reference
+============================================================
+
+--- SETUP (one-time) ---
+
+1. Create virtual environment:
+   python -m venv venv
+
+2. Activate virtual environment:
+   Windows CMD:    venv\Scripts\activate
+   Windows PS:     venv\Scripts\Activate.ps1
+   Linux/macOS:    source venv/bin/activate
+
+3. Install dependencies:
+   pip install -r requirements.txt
+
+
+--- INGESTION ---
+
+Basic ingestion (reads all .txt files from ./input_texts/):
+   python ingest.py ingest
+
+Custom input directory:
+   python ingest.py ingest --input-dir "C:\path\to\your\txt\files"
+
+Custom chunk size and overlap:
+   python ingest.py ingest --chunk-size 500 --chunk-overlap 100
+
+Reset collection before ingesting (wipes old data):
+   python ingest.py ingest --reset
+
+Custom collection name:
+   python ingest.py ingest --collection my_collection
+
+Custom database directory:
+   python ingest.py ingest --db-dir ./my_database
+
+Handle non-UTF8 files:
+   python ingest.py ingest --encoding latin-1
+
+Full example with all options:
+   python ingest.py ingest --input-dir ./my_texts --db-dir ./my_db --collection docs --chunk-size 800 --chunk-overlap 150 --encoding utf-8 --batch-size 50 --reset
+
+
+--- QUERYING ---
+
+Basic query:
+   python ingest.py query "What is machine learning?"
+
+Return more results:
+   python ingest.py query "search term" --n-results 10
+
+Query a specific collection:
+   python ingest.py query "search term" --collection my_collection
+
+Query a specific database:
+   python ingest.py query "search term" --db-dir ./my_database
+
+
+--- DEACTIVATE VENV ---
+
+   deactivate

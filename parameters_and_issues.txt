@@ -1,0 +1,127 @@
+============================================================
+  Parameters & Potential Issues Reference
+============================================================
+
+
+=== PARAMETERS ===
+
+--input-dir (default: ./input_texts)
+    Directory where your .txt files live. All .txt files in this
+    directory will be read (not recursive — subdirectories are ignored).
+
+--db-dir (default: ./chroma_db)
+    Where ChromaDB stores its persistent data on disk. This folder
+    will grow as you add more documents. Do NOT delete it unless you
+    want to lose all vectorized data.
+
+--collection (default: documents)
+    The name of the ChromaDB collection. You can use multiple
+    collections to separate different datasets within the same DB.
+    Must contain only alphanumeric characters, underscores, hyphens.
+    Length: 3-63 characters. Cannot start/end with a period.
+
+--chunk-size (default: 1000)
+    Number of characters per text chunk. ChromaDB's default embedding
+    model (all-MiniLM-L6-v2) has a max token limit of ~256 tokens
+    (~1000 chars). Going much larger means the tail of each chunk
+    gets truncated by the embedding model, reducing search quality.
+
+--chunk-overlap (default: 200)
+    Characters shared between consecutive chunks. Helps preserve
+    context at chunk boundaries. Must be less than chunk-size.
+
+--encoding (default: utf-8)
+    Text file encoding. Common alternatives: latin-1, cp1252,
+    utf-16. Files that fail to decode are skipped with a warning.
+
+--batch-size (default: 100)
+    Number of documents sent to ChromaDB per upsert call. Lower
+    values use less memory but are slower.
+
+--reset (flag, default: off)
+    Deletes the entire collection before ingesting. Use this when
+    you want a clean slate. Without this flag, re-ingesting the
+    same files will upsert (update existing chunks, add new ones).
+
+--n-results (query only, default: 5)
+    Number of nearest-neighbor results to return from a query.
+
+
+=== POTENTIAL ISSUES ===
+
+1. FILE ENCODING MISMATCH
+   Symptom:  UnicodeDecodeError, garbled text, or files silently skipped.
+   Cause:    Your .txt files aren't actually UTF-8 (common with files
+             created on Windows or exported from legacy systems).
+   Fix:      Use --encoding latin-1 or --encoding cp1252. Or convert
+             files to UTF-8 beforehand.
+
+2. CHUNK SIZE TOO LARGE
+   Symptom:  Query results seem irrelevant or miss obvious matches.
+   Cause:    The default embedding model (all-MiniLM-L6-v2) truncates
+             input beyond ~256 tokens. Large chunks lose information.
+   Fix:      Keep --chunk-size at 1000 or below. For dense technical
+             text, try 500.
+
+3. CHUNK SIZE TOO SMALL
+   Symptom:  Results are too fragmented / lack context.
+   Cause:    Chunks are too short to carry meaningful semantics.
+   Fix:      Increase --chunk-size. 500-1000 is a good range.
+
+4. CHUNK OVERLAP TOO HIGH
+   Symptom:  Massive database size, slow ingestion, many near-duplicate
+             results.
+   Cause:    High overlap creates many redundant chunks.
+   Fix:      Keep overlap at 10-20% of chunk-size (e.g., 200 for 1000).
+
+5. VERY LARGE FILES (100MB+)
+   Symptom:  High memory usage, slow processing, possible OOM crash.
+   Cause:    Entire file is read into memory at once.
+   Fix:      Split large files into smaller ones before ingestion.
+             Or reduce batch-size to lower peak memory.
+
+6. MANY FILES (10,000+)
+   Symptom:  Slow ingestion.
+   Cause:    Each file is processed sequentially; embedding is CPU-bound.
+   Fix:      This is expected — ChromaDB's default embedding model runs
+             on CPU. For large-scale ingestion, consider using a GPU-
+             accelerated embedding function or batching across sessions.
+
+7. DUPLICATE INGESTION
+   Symptom:  Collection count keeps growing on re-runs with the same files.
+   Cause:    This should NOT happen — the pipeline uses deterministic IDs
+             (filename + chunk index) and upserts, so re-running is safe.
+             However, if you RENAME files or change chunk-size/overlap,
+             old chunks won't be cleaned up.
+   Fix:      Use --reset when changing chunking parameters or after
+             renaming/removing source files.
+
+8. CHROMADB SQLITE LOCK
+   Symptom:  "database is locked" error.
+   Cause:    Two processes are accessing the same chroma_db directory.
+   Fix:      Only run one instance of the pipeline at a time per db-dir.
+
+9. DISK SPACE
+   Symptom:  Write errors during ingestion.
+   Cause:    ChromaDB stores embeddings + metadata + a SQLite index.
+             Roughly expect 2-3x the raw text size on disk.
+   Fix:      Ensure sufficient free disk space before large ingestions.
+
+10. FIRST RUN IS SLOW
+    Symptom:  Long delay on first ingestion.
+    Cause:    ChromaDB downloads the default embedding model
+              (~80MB, all-MiniLM-L6-v2) on first use.
+    Fix:      This is a one-time download. Ensure internet access
+              on first run. Subsequent runs use the cached model.
+
+11. PERMISSION ERRORS ON WINDOWS
+    Symptom:  PermissionError when activating venv or running pip.
+    Cause:    PowerShell execution policy blocks scripts.
+    Fix:      Run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+              Or use CMD instead of PowerShell.
+
+12. COSINE DISTANCE INTERPRETATION
+    Symptom:  Confusion about result scores.
+    Cause:    ChromaDB returns cosine DISTANCE (0 = identical, 2 = opposite).
+              This is NOT similarity. Lower distance = better match.
+    Fix:      No fix needed — just be aware. Similarity = 1 - distance.
